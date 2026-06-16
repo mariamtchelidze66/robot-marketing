@@ -1,0 +1,16 @@
+[Unit]
+Description=Robot Marketing Telegram Bot (Milad)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/robot-marketing
+ExecStart=/root/robot-marketing/venv/bin/python /root/robot-marketing/bot.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/robot-marketing/bot.log
+StandardError=append:/root/robot-marketing/bot.log
+
+[Install]
+WantedBy=multi-user.target
