@@ -146,38 +146,109 @@ else
   warn "Skipped venv/deps."
 fi
 
-# ---------- 4) config (.env) ----------
-step "4) Configuration (.env)"
+# ---------- 4) config (.env) + connection test ----------
+step "4) Configuration (.env) & connection test"
+# Secrets the bot reads (see config.py):
+#   TELEGRAM_BOT_TOKEN (required) — @BotFather
+#   ANTHROPIC_API_KEY  (required) — console.anthropic.com  (text parsing)
+#   OPENAI_API_KEY     (required for voice) — platform.openai.com (speech-to-text)
+# This step ASKS for each and TESTS the connection before saving.
 ENV_FILE="$DEST/.env"
-if [[ -f "$ENV_FILE" ]]; then
-  info ".env already exists — leaving it untouched (edit it by hand if needed)."
-elif ask "Create a template .env at $ENV_FILE (blank placeholders you fill in)?" y; then
-  # Never write real secrets here — only blank placeholders + guidance.
-  cat > "$ENV_FILE" <<'EOF'
-# robot-marketing secrets — fill these in, then keep this file private.
-# chmod 600 .env  (done automatically by the installer)
 
-# OpenAI API key — used for voice (speech-to-text). Get it from platform.openai.com
-OPENAI_API_KEY=
+ask_secret(){  # ask_secret "prompt" -> echoes typed value (hidden input, fd 3)
+  local q="$1" ans=""
+  if [[ "$ASSUME_YES" == "1" ]]; then echo ""; return; fi
+  read -rsp "$(echo -e "${Y}[?]${N} $q ")" -u 3 ans || ans=""
+  echo >&2
+  echo "$ans"
+}
+test_telegram(){  # $1=token
+  local out
+  out=$(curl -fsS --max-time 15 "https://api.telegram.org/bot$1/getMe" 2>/dev/null) || return 1
+  echo "$out" | grep -q '"ok":true'
+}
+test_anthropic(){ # $1=key
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 \
+    https://api.anthropic.com/v1/models \
+    -H "x-api-key: $1" -H "anthropic-version: 2023-06-01" 2>/dev/null)
+  [[ "$code" == "200" ]]
+}
+test_openai(){    # $1=key
+  local code
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 \
+    https://api.openai.com/v1/models -H "Authorization: Bearer $1" 2>/dev/null)
+  [[ "$code" == "200" ]]
+}
 
-# Anthropic API key — used for text parsing (Claude). Get it from console.anthropic.com
-ANTHROPIC_API_KEY=
+TELEGRAM_BOT_TOKEN=""; ANTHROPIC_API_KEY=""; OPENAI_API_KEY=""
 
-# Telegram bot token — get it from @BotFather on Telegram
-TELEGRAM_BOT_TOKEN=
+if [[ -f "$ENV_FILE" ]] && ! ask ".env already exists at $ENV_FILE — overwrite it?" n; then
+  info "Keeping existing .env; loading it to re-test the connections."
+  set -a; . "$ENV_FILE"; set +a
+else
+  # --- Telegram bot token (required) ---
+  while :; do
+    TELEGRAM_BOT_TOKEN="$(ask_secret 'Telegram bot token (from @BotFather):')"
+    if [[ -z "$TELEGRAM_BOT_TOKEN" ]]; then
+      warn "Empty token — the bot cannot run without it."
+      ask "Skip for now and fill .env manually?" n && break || continue
+    fi
+    info "Testing the Telegram token…"
+    if test_telegram "$TELEGRAM_BOT_TOKEN"; then ok "Telegram token works — connected ✅"; break
+    else err "Telegram rejected that token."; ask "Try a different token?" y || break; fi
+  done
+  # --- Anthropic API key (required) ---
+  while :; do
+    ANTHROPIC_API_KEY="$(ask_secret 'Anthropic API key (from console.anthropic.com):')"
+    if [[ -z "$ANTHROPIC_API_KEY" ]]; then
+      warn "Empty key — text parsing needs it."
+      ask "Skip for now and fill .env manually?" n && break || continue
+    fi
+    info "Testing the Anthropic key…"
+    if test_anthropic "$ANTHROPIC_API_KEY"; then ok "Anthropic key works — connected ✅"; break
+    else err "Anthropic rejected that key (or no network)."; ask "Try a different key?" y || break; fi
+  done
+  # --- OpenAI API key (required for voice) ---
+  while :; do
+    OPENAI_API_KEY="$(ask_secret 'OpenAI API key (voice/speech-to-text, from platform.openai.com):')"
+    if [[ -z "$OPENAI_API_KEY" ]]; then
+      warn "Empty — voice features will be disabled (text still works)."
+      ask "Skip the OpenAI key?" y && break || continue
+    fi
+    info "Testing the OpenAI key…"
+    if test_openai "$OPENAI_API_KEY"; then ok "OpenAI key works — connected ✅"; break
+    else err "OpenAI rejected that key (or no network)."; ask "Try a different key?" y || break; fi
+  done
+  # write .env
+  umask 077
+  cat > "$ENV_FILE" <<EOF
+# robot-marketing secrets — do NOT commit this file.
+OPENAI_API_KEY=${OPENAI_API_KEY}
+ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 
-# ---- Optional overrides (defaults shown as comments) ----
+# ---- Optional overrides (defaults shown) ----
 # WEB_HOST=0.0.0.0
 # WEB_PORT=8080
-# WEB_PASSWORD=robot1234     # password for the web dashboard — CHANGE THIS
+# WEB_PASSWORD=robot1234     # web dashboard password — CHANGE THIS
 # MAX_EMPLOYEES=3
 EOF
-  chmod 600 "$ENV_FILE"
-  ok "Wrote $ENV_FILE (chmod 600)."
-  warn "IMPORTANT: edit $ENV_FILE and fill in OPENAI_API_KEY, ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN before running."
-else
-  warn "Skipped .env creation — the bot will not start without it."
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
+  ok "Saved $ENV_FILE (chmod 600)."
 fi
+
+# --- final connectivity summary ---
+step "4b) Connection summary"
+if [[ -n "${TELEGRAM_BOT_TOKEN:-}" ]] && test_telegram "$TELEGRAM_BOT_TOKEN"; then
+  ok "Telegram: connected ✅"
+else warn "Telegram: NOT verified — check TELEGRAM_BOT_TOKEN in $ENV_FILE"; fi
+if [[ -n "${ANTHROPIC_API_KEY:-}" ]] && test_anthropic "$ANTHROPIC_API_KEY"; then
+  ok "Anthropic: connected ✅"
+else warn "Anthropic: NOT verified — check ANTHROPIC_API_KEY in $ENV_FILE"; fi
+if [[ -n "${OPENAI_API_KEY:-}" ]] && test_openai "$OPENAI_API_KEY"; then
+  ok "OpenAI: connected ✅"
+else warn "OpenAI: not set/verified — voice disabled (text still works)"; fi
 
 # ---------- 5) systemd service (optional) ----------
 step "5) systemd service (optional)"
